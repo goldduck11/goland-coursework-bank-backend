@@ -1,0 +1,19 @@
+services:
+  transaction-bank-postgres:
+    image: postgres:17.1-bookworm
+    container_name: transation-env-postgres
+    environment:
+      POSTGRES_DB:
+      POSTGRES_USER:
+      POSTGRES_PASSWORD:
+    ports:
+      - "5431:5432"
+    restart: always
+  app:
+    build: .
+    container_name: go_web_app
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      - transaction-bank-postgres
