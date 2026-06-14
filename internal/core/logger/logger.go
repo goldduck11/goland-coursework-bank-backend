@@ -1,29 +1,19 @@
 package logger
 
-import (
-	"os"
+import "github.com/sirupsen/logrus"
 
-	"github.com/sirupsen/logrus"
-)
-
-type Logger struct {
-	*logrus.Logger
-}
-
-func NewLogger(logLevel string) *Logger {
+// New создаёт настроенный logrus-логгер.
+// Уровень логирования задаётся через переменную окружения LOG_LEVEL (debug, info, warn, error).
+func New(level string) *logrus.Logger {
 	log := logrus.New()
-
-	log.SetOutput(os.Stdout)
-
-	log.SetFormatter(&logrus.TextFormatter{
-		FullTimestamp: true,
+	log.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: "2006-01-02T15:04:05Z07:00",
 	})
 
-	level, err := logrus.ParseLevel(logLevel)
+	parsed, err := logrus.ParseLevel(level)
 	if err != nil {
-		level = logrus.InfoLevel
+		parsed = logrus.InfoLevel
 	}
-	log.SetLevel(level)
-
-	return &Logger{log}
+	log.SetLevel(parsed)
+	return log
 }

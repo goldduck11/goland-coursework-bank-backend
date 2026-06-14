@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
-	"awesomeProject/internal/service"
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/service"
 
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -44,11 +46,16 @@ func (h *CreditHandler) ApplyForCredit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *CreditHandler) GetPaymentSchedule(w http.ResponseWriter, r *http.Request) {
+	userID := getUserIDFromContext(r)
 	vars := mux.Vars(r)
 	creditID := vars["creditId"]
 
-	schedule, err := h.service.GetPaymentSchedule(r.Context(), creditID)
+	schedule, err := h.service.GetPaymentSchedule(r.Context(), creditID, userID)
 	if err != nil {
+		if errors.Is(err, postgres.ErrAccessDenied) {
+			respondWithError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		h.logger.WithError(err).Error("Failed to fetch payment schedule")
 		respondWithError(w, http.StatusInternalServerError, "Failed to fetch schedule")
 		return

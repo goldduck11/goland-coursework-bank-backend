@@ -16,6 +16,13 @@ type AccountRepository struct {
 	db *sql.DB
 }
 
+type DBAccount struct {
+	ID            string  `json:"id"`
+	AccountNumber string  `json:"account_number"`
+	Currency      string  `json:"currency"`
+	Balance       float64 `json:"balance"`
+}
+
 func NewAccountRepository(db *sql.DB) *AccountRepository {
 	return &AccountRepository{db: db}
 }
@@ -27,59 +34,161 @@ func (r *AccountRepository) CreateAccount(ctx context.Context, userID, accountNu
 	return id, err
 }
 
-// TransferFunds выполняет атомарный перевод денег со счета на счет с проверкой баланса и прав
-func (r *AccountRepository) TransferFunds(ctx context.Context, senderID, receiverID string, amount float64, ownerUserID string) error {
-	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() // Откатит изменения, если вызовем return до tx.Commit()
-
-	// 1. Проверяем и блокируем счет отправителя (FOR UPDATE)
-	var senderBalance float64
-	var accountOwnerID string
-	err = tx.QueryRowContext(ctx, "SELECT balance, user_id FROM accounts WHERE id = $1 FOR UPDATE", senderID).Scan(&senderBalance, &accountOwnerID)
+func (r *AccountRepository) VerifyOwnership(ctx context.Context, accountID, userID string) error {
+	var ownerID string
+	err := r.db.QueryRowContext(ctx, "SELECT user_id FROM accounts WHERE id = $1", accountID).Scan(&ownerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrAccountNotFound
 		}
 		return err
 	}
-
-	// Защита прав доступа
-	if accountOwnerID != ownerUserID {
+	if ownerID != userID {
 		return ErrAccessDenied
 	}
+	return nil
+}
 
-	// Проверка баланса
+func (r *AccountRepository) GetAccountsByUserID(ctx context.Context, userID string) ([]DBAccount, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, account_number, currency, balance FROM accounts WHERE user_id = $1 ORDER BY created_at`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []DBAccount
+	for rows.Next() {
+		var a DBAccount
+		if err := rows.Scan(&a.ID, &a.AccountNumber, &a.Currency, &a.Balance); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, nil
+}
+
+func (r *AccountRepository) DepositFunds(ctx context.Context, accountID string, amount float64, ownerUserID string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := r.lockAndVerifyOwner(ctx, tx, accountID, ownerUserID); err != nil {
+		return err
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		"UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, accountID); err != nil {
+		return err
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO transactions (receiver_account_id, amount, transaction_type) VALUES ($1, $2, 'deposit')`,
+		accountID, amount); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (r *AccountRepository) WithdrawFunds(ctx context.Context, accountID string, amount float64, ownerUserID string) error {
+	return r.deductFunds(ctx, accountID, amount, ownerUserID, "withdraw")
+}
+
+func (r *AccountRepository) PayFromAccount(ctx context.Context, accountID string, amount float64, ownerUserID string) error {
+	return r.deductFunds(ctx, accountID, amount, ownerUserID, "payment")
+}
+
+func (r *AccountRepository) deductFunds(ctx context.Context, accountID string, amount float64, ownerUserID, txType string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	balance, err := r.lockAndVerifyOwnerWithBalance(ctx, tx, accountID, ownerUserID)
+	if err != nil {
+		return err
+	}
+	if balance < amount {
+		return ErrInsufficientFunds
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		"UPDATE accounts SET balance = balance - $1 WHERE id = $2", amount, accountID); err != nil {
+		return err
+	}
+
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO transactions (sender_account_id, amount, transaction_type) VALUES ($1, $2, $3)`,
+		accountID, amount, txType); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func (r *AccountRepository) TransferFunds(ctx context.Context, senderID, receiverID string, amount float64, ownerUserID string) error {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	senderBalance, err := r.lockAndVerifyOwnerWithBalance(ctx, tx, senderID, ownerUserID)
+	if err != nil {
+		return err
+	}
 	if senderBalance < amount {
 		return ErrInsufficientFunds
 	}
 
-	// 2. Списываем средства
-	_, err = tx.ExecContext(ctx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", amount, senderID)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx,
+		"UPDATE accounts SET balance = balance - $1 WHERE id = $2", amount, senderID); err != nil {
 		return err
 	}
 
-	// 3. Зачисляем средства получателю
-	res, err := tx.ExecContext(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, receiverID)
+	res, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, receiverID)
 	if err != nil {
 		return err
 	}
-
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return errors.New("receiver account not found")
 	}
 
-	// 4. Записываем операцию в историю транзакций
-	logQuery := `INSERT INTO transactions (sender_account_id, receiver_account_id, amount, transaction_type) 
-	             VALUES ($1, $2, $3, 'transfer')`
-	_, err = tx.ExecContext(ctx, logQuery, senderID, receiverID, amount)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx,
+		`INSERT INTO transactions (sender_account_id, receiver_account_id, amount, transaction_type) 
+		 VALUES ($1, $2, $3, 'transfer')`, senderID, receiverID, amount); err != nil {
 		return err
 	}
 
 	return tx.Commit()
+}
+
+func (r *AccountRepository) lockAndVerifyOwner(ctx context.Context, tx *sql.Tx, accountID, ownerUserID string) error {
+	_, err := r.lockAndVerifyOwnerWithBalance(ctx, tx, accountID, ownerUserID)
+	return err
+}
+
+func (r *AccountRepository) lockAndVerifyOwnerWithBalance(ctx context.Context, tx *sql.Tx, accountID, ownerUserID string) (float64, error) {
+	var balance float64
+	var accountOwnerID string
+	err := tx.QueryRowContext(ctx,
+		"SELECT balance, user_id FROM accounts WHERE id = $1 FOR UPDATE", accountID).
+		Scan(&balance, &accountOwnerID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAccountNotFound
+		}
+		return 0, err
+	}
+	if accountOwnerID != ownerUserID {
+		return 0, ErrAccessDenied
+	}
+	return balance, nil
 }

@@ -4,29 +4,43 @@ import (
 	"context"
 	"time"
 
-	"awesomeProject/internal/repository/postgres"
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/service/external"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthService struct {
-	repo      *postgres.UserRepository
-	jwtSecret string
+	repo         *postgres.UserRepository
+	jwtSecret    string
+	emailService *external.EmailService
 }
 
-func NewAuthService(repo *postgres.UserRepository, jwtSecret string) *AuthService {
-	return &AuthService{repo: repo, jwtSecret: jwtSecret}
+func NewAuthService(repo *postgres.UserRepository, jwtSecret string, emailService *external.EmailService) *AuthService {
+	return &AuthService{repo: repo, jwtSecret: jwtSecret, emailService: emailService}
 }
 
 func (s *AuthService) Register(ctx context.Context, username, email, password string) (string, error) {
-	// Хеширование пароля через bcrypt
+	if len(password) < 6 {
+		return "", postgres.ErrInvalidCredentials
+	}
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return "", err
 	}
 
-	return s.repo.CreateUser(ctx, username, email, string(hashedPassword))
+	id, err := s.repo.CreateUser(ctx, username, email, string(hashedPassword))
+	if err != nil {
+		return "", err
+	}
+
+	if s.emailService != nil {
+		s.emailService.SendRegistrationWelcome(email, username)
+	}
+
+	return id, nil
 }
 
 func (s *AuthService) Login(ctx context.Context, email, password string) (string, error) {
@@ -35,12 +49,10 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (string
 		return "", err
 	}
 
-	// Проверка соответствия пароля
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(password)); err != nil {
-		return "", postgres.ErrUserNotFound // Скрываем детали для безопасности
+		return "", postgres.ErrUserNotFound
 	}
 
-	// Генерация JWT токена на 24 часа
 	claims := jwt.RegisteredClaims{
 		Subject:   userID,
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),

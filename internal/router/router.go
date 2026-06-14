@@ -6,8 +6,8 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 
-	"awesomeProject/internal/handlers"
-	"awesomeProject/internal/middleware"
+	"banking-system/internal/handlers"
+	"banking-system/internal/middleware"
 )
 
 // Config объединяет все хендлеры и зависимости для роутера

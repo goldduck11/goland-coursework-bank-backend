@@ -14,130 +14,107 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
-	"awesomeProject/internal/handlers"
-	"awesomeProject/internal/repository/postgres"
-	"awesomeProject/internal/router"
-	"awesomeProject/internal/service"
-	"awesomeProject/internal/service/external"
+	"banking-system/internal/config"
+	"banking-system/internal/core/logger"
+	"banking-system/internal/handlers"
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/router"
+	"banking-system/internal/service"
+	"banking-system/internal/service/external"
+	"banking-system/internal/utils"
 )
 
+//go:embed scripts/init.sql
 var initSQL string
 
 func main() {
-	// 1. Настройка логгера
-	logger := logrus.New()
-	logger.SetFormatter(&logrus.JSONFormatter{})
-	logger.Info("Starting Banking Service...")
-
-	// 2. Строгое чтение переменных окружения (БЕЗ ХАРДКОДА)
-	dbConnStr := os.Getenv("DATABASE_URL")
-	if dbConnStr == "" {
-		logger.Fatal("CRITICAL: DATABASE_URL environment variable is not set")
+	cfg, err := config.Load()
+	if err != nil {
+		logrus.WithError(err).Fatal("Failed to load configuration")
 	}
 
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		logger.Fatal("CRITICAL: JWT_SECRET environment variable is not set")
+	log := logger.New(cfg.LogLevel)
+	log.Info("Starting Banking Service...")
+
+	if err := utils.InitPGPKeys(cfg.PGPPublicKey, cfg.PGPPrivateKey, cfg.PGPPassphrase); err != nil {
+		log.WithError(err).Fatal("Failed to initialize PGP keys")
 	}
 
-	serverPort := os.Getenv("SERVER_PORT")
-	if serverPort == "" {
-		logger.Fatal("CRITICAL: SERVER_PORT environment variable is not set")
-	}
-
-	// 3. Создаем контекст для отлова системных сигналов
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 4. Подключение к БД
-	db, err := sql.Open("postgres", dbConnStr)
+	db, err := sql.Open("postgres", cfg.DatabaseURL)
 	if err != nil {
-		logger.WithError(err).Fatal("Failed to open database")
+		log.WithError(err).Fatal("Failed to open database")
 	}
 	defer db.Close()
 
-	// Автоматический запуск скрипта инициализации таблиц
-	logger.Info("Running database initialization script...")
-
+	log.Info("Running database initialization script...")
 	if _, err := db.Exec(initSQL); err != nil {
-		logger.WithError(err).Fatal("Failed to initialize database schema")
+		log.WithError(err).Fatal("Failed to initialize database schema")
 	}
-	logger.Infof("Database schema is up to date! (Executed %d bytes of SQL)", len(initSQL))
+	log.Infof("Database schema is up to date! (Executed %d bytes of SQL)", len(initSQL))
 
 	db.SetMaxOpenConns(25)
 	if err := db.Ping(); err != nil {
-		logger.WithError(err).Fatal("Database is unreachable")
+		log.WithError(err).Fatal("Database is unreachable")
 	}
 
-	// 4. Инициализация слоев (Dependency Injection)
 	cbrClient := external.NewCBRClient()
+	emailService := external.NewEmailService(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom, log)
 
 	userRepo := postgres.NewUserRepository(db)
 	accountRepo := postgres.NewAccountRepository(db)
 	cardRepo := postgres.NewCardRepository(db)
 	creditRepo := postgres.NewCreditRepository(db)
+	transactionRepo := postgres.NewTransactionRepository(db)
 
-	authService := service.NewAuthService(userRepo, jwtSecret)
+	authService := service.NewAuthService(userRepo, cfg.JWTSecret, emailService)
 	accountService := service.NewAccountService(accountRepo)
-	cardService := service.NewCardService(cardRepo)
+	cardService := service.NewCardService(cardRepo, accountRepo, cfg.HMACSecret)
 	creditService := service.NewCreditService(creditRepo, accountRepo, cbrClient)
-	analyticsService := service.NewAnalyticsService(db)
+	analyticsService := service.NewAnalyticsService(db, transactionRepo)
 
-	// 5. Запуск фонового шедулера (каждые 12 часов)
-	scheduler := service.NewCreditScheduler(db, logger)
+	scheduler := service.NewCreditScheduler(db, userRepo, emailService, log)
 	scheduler.Start(ctx)
 
-	// 6. Сборка маршрутизатора из нашего нового пакета router
 	mainRouter := router.New(router.Config{
-		Logger:           logger,
-		JWTSecret:        jwtSecret,
-		AuthHandler:      handlers.NewAuthHandler(authService, logger),
-		AccountHandler:   handlers.NewAccountHandler(accountService, logger),
-		CardHandler:      handlers.NewCardHandler(cardService, logger),
-		TransferHandler:  handlers.NewTransferHandler(accountService, logger),
-		CreditHandler:    handlers.NewCreditHandler(creditService, logger),
-		AnalyticsHandler: handlers.NewAnalyticsHandler(analyticsService, logger),
+		Logger:           log,
+		JWTSecret:        cfg.JWTSecret,
+		AuthHandler:      handlers.NewAuthHandler(authService, log),
+		AccountHandler:   handlers.NewAccountHandler(accountService, log),
+		CardHandler:      handlers.NewCardHandler(cardService, log),
+		TransferHandler:  handlers.NewTransferHandler(accountService, log),
+		CreditHandler:    handlers.NewCreditHandler(creditService, log),
+		AnalyticsHandler: handlers.NewAnalyticsHandler(analyticsService, log),
 	})
 
-	// 7. Конфигурация и запуск HTTP-сервера
 	srv := &http.Server{
-		Addr:         serverPort,
+		Addr:         cfg.ServerPort,
 		Handler:      mainRouter,
 		WriteTimeout: 15 * time.Second,
 		ReadTimeout:  15 * time.Second,
 	}
 
-	// Запускаем сервер в фоне, чтобы он не блокировал ожидание системных сигналов
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Infof("Server is listening on port %s", serverPort)
+		log.Infof("Server is listening on port %s", cfg.ServerPort)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrors <- err
 		}
 	}()
 
-	// 8. Ожидание: либо сервер упал с ошибкой, либо юзер нажал Ctrl+C
 	select {
 	case err := <-serverErrors:
-		logger.WithError(err).Fatal("HTTP server critical error")
+		log.WithError(err).Fatal("HTTP server critical error")
 	case <-ctx.Done():
-		logger.Info("Shutdown signal received, stopping gracefully...")
-
-		// Даем серверу 5 секунд на завершение текущих транзакций/запросов
+		log.Info("Shutdown signal received, stopping gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			logger.WithError(err).Error("Server forced to shutdown")
+			log.WithError(err).Error("Server forced to shutdown")
 		}
 	}
 
-	logger.Info("Banking Service stopped safely.")
-}
-
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
+	log.Info("Banking Service stopped safely.")
 }

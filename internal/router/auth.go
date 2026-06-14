@@ -1,7 +1,7 @@
 package router
 
 import (
-	"awesomeProject/internal/handlers"
+	"banking-system/internal/handlers"
 	"net/http"
 
 	"github.com/gorilla/mux"

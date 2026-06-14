@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"awesomeProject/internal/service"
+	"banking-system/internal/service"
 
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -24,7 +24,6 @@ func (h *AnalyticsHandler) PredictBalance(w http.ResponseWriter, r *http.Request
 	vars := mux.Vars(r)
 	accountID := vars["accountId"]
 
-	// Читаем query-параметр ?days=30 (по умолчанию 30 дней)
 	daysStr := r.URL.Query().Get("days")
 	days := 30
 	if daysStr != "" {
@@ -49,6 +48,11 @@ func (h *AnalyticsHandler) PredictBalance(w http.ResponseWriter, r *http.Request
 
 func (h *AnalyticsHandler) GetMonthlyStats(w http.ResponseWriter, r *http.Request) {
 	userID := getUserIDFromContext(r)
-	stats, _ := h.service.GetMonthlyStats(r.Context(), userID)
-	respondWithJSON(w, http.StatusOK, map[string]string{"stats": stats})
+	stats, err := h.service.GetMonthlyStats(r.Context(), userID)
+	if err != nil {
+		h.logger.WithError(err).Error("Analytics failed")
+		respondWithError(w, http.StatusInternalServerError, "Failed to get analytics")
+		return
+	}
+	respondWithJSON(w, http.StatusOK, stats)
 }

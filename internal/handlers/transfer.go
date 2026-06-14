@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	"awesomeProject/internal/repository/postgres"
-	"awesomeProject/internal/service"
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/service"
 
 	"github.com/sirupsen/logrus"
 )

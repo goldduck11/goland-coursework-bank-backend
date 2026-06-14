@@ -1,8 +1,8 @@
 package handlers
 
 import (
-	"awesomeProject/internal/model"
-	"awesomeProject/internal/service"
+	"banking-system/internal/model"
+	"banking-system/internal/service"
 	"encoding/json"
 	"net/http"
 )

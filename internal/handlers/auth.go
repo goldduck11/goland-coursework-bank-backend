@@ -5,8 +5,9 @@ import (
 	"errors"
 	"net/http"
 
-	"awesomeProject/internal/repository/postgres"
-	"awesomeProject/internal/service"
+	"banking-system/internal/model"
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/service"
 
 	"github.com/sirupsen/logrus"
 )
@@ -21,14 +22,14 @@ func NewAuthHandler(s *service.AuthService, l *logrus.Logger) *AuthHandler {
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Username string `json:"username"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var req model.RegisterRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -36,6 +37,10 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, postgres.ErrUserAlreadyExists) {
 			respondWithError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if errors.Is(err, postgres.ErrInvalidCredentials) {
+			respondWithError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		h.logger.WithError(err).Error("Registration failed")

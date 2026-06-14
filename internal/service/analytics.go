@@ -5,14 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"banking-system/internal/repository/postgres"
 )
 
-type AnalyticsService struct {
-	db *sql.DB
+type MonthlyStats struct {
+	Month        string  `json:"month"`
+	Income       float64 `json:"income"`
+	Expense      float64 `json:"expense"`
+	NetFlow      float64 `json:"net_flow"`
+	CreditLoad   float64 `json:"credit_load"`
+	TotalBalance float64 `json:"total_balance"`
 }
 
-func NewAnalyticsService(db *sql.DB) *AnalyticsService {
-	return &AnalyticsService{db: db}
+type AnalyticsService struct {
+	db              *sql.DB
+	transactionRepo *postgres.TransactionRepository
+}
+
+func NewAnalyticsService(db *sql.DB, transactionRepo *postgres.TransactionRepository) *AnalyticsService {
+	return &AnalyticsService{db: db, transactionRepo: transactionRepo}
 }
 
 func (s *AnalyticsService) PredictBalance(ctx context.Context, accountID string, days int, userID string) (float64, error) {
@@ -22,7 +34,9 @@ func (s *AnalyticsService) PredictBalance(ctx context.Context, accountID string,
 
 	var currentBalance float64
 	var ownerID string
-	err := s.db.QueryRowContext(ctx, "SELECT balance, user_id FROM accounts WHERE id = $1", accountID).Scan(&currentBalance, &ownerID)
+	err := s.db.QueryRowContext(ctx,
+		"SELECT balance, user_id FROM accounts WHERE id = $1", accountID).
+		Scan(&currentBalance, &ownerID)
 	if err != nil {
 		return 0, err
 	}
@@ -51,10 +65,34 @@ func (s *AnalyticsService) PredictBalance(ctx context.Context, accountID string,
 	if predictedBalance < 0 {
 		predictedBalance = 0
 	}
-
 	return predictedBalance, nil
 }
 
-func (s *AnalyticsService) GetMonthlyStats(ctx context.Context, userID string) (string, error) {
-	return "Analytics stats: OK", nil
+func (s *AnalyticsService) GetMonthlyStats(ctx context.Context, userID string) (*MonthlyStats, error) {
+	now := time.Now()
+	income, err := s.transactionRepo.GetMonthlyIncome(ctx, userID, now)
+	if err != nil {
+		return nil, err
+	}
+	expense, err := s.transactionRepo.GetMonthlyExpense(ctx, userID, now)
+	if err != nil {
+		return nil, err
+	}
+	creditLoad, err := s.transactionRepo.GetCreditLoad(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	totalBalance, err := s.transactionRepo.GetTotalBalance(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MonthlyStats{
+		Month:        now.Format("2006-01"),
+		Income:       income,
+		Expense:      expense,
+		NetFlow:      income - expense,
+		CreditLoad:   creditLoad,
+		TotalBalance: totalBalance,
+	}, nil
 }

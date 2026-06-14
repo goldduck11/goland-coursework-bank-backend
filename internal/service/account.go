@@ -5,7 +5,7 @@ import (
 	"crypto/rand"
 	"math/big"
 
-	"awesomeProject/internal/repository/postgres"
+	"banking-system/internal/repository/postgres"
 )
 
 type AccountService struct {
@@ -17,14 +17,24 @@ func NewAccountService(repo *postgres.AccountRepository) *AccountService {
 }
 
 func (s *AccountService) CreateAccount(ctx context.Context, userID string) (string, error) {
-	// Генерация 20-значного номера счета для примера (начинается с 408)
 	accNum := "40817810"
 	for i := 0; i < 12; i++ {
 		n, _ := rand.Int(rand.Reader, big.NewInt(10))
 		accNum += n.String()
 	}
-
 	return s.repo.CreateAccount(ctx, userID, accNum)
+}
+
+func (s *AccountService) GetAccounts(ctx context.Context, userID string) ([]postgres.DBAccount, error) {
+	return s.repo.GetAccountsByUserID(ctx, userID)
+}
+
+func (s *AccountService) Deposit(ctx context.Context, accountID string, amount float64, ownerUserID string) error {
+	return s.repo.DepositFunds(ctx, accountID, amount, ownerUserID)
+}
+
+func (s *AccountService) Withdraw(ctx context.Context, accountID string, amount float64, ownerUserID string) error {
+	return s.repo.WithdrawFunds(ctx, accountID, amount, ownerUserID)
 }
 
 func (s *AccountService) Transfer(ctx context.Context, senderID, receiverID string, amount float64, ownerUserID string) error {

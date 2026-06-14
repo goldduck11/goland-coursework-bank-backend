@@ -10,8 +10,9 @@ import (
 )
 
 var (
-	ErrUserAlreadyExists = errors.New("username or email already taken")
-	ErrUserNotFound      = errors.New("user not found")
+	ErrUserAlreadyExists  = errors.New("username or email already taken")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrInvalidCredentials = errors.New("invalid credentials")
 )
 
 type UserRepository struct {
@@ -53,4 +54,15 @@ func (r *UserRepository) GetPasswordHashByEmail(ctx context.Context, email strin
 	}
 
 	return id, hash, nil
+}
+
+func (r *UserRepository) GetUserByID(ctx context.Context, userID string) (username, email string, err error) {
+	query := `SELECT username, email FROM users WHERE id = $1`
+	err = r.db.QueryRowContext(ctx, query, userID).Scan(&username, &email)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", ErrUserNotFound
+		}
+	}
+	return
 }

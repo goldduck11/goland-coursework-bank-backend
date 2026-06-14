@@ -1,58 +1,123 @@
 package service
 
 import (
-	"awesomeProject/internal/repository/postgres"
-	"awesomeProject/internal/utils"
 	"context"
+	"errors"
+	"fmt"
+
+	"banking-system/internal/repository/postgres"
+	"banking-system/internal/utils"
 )
 
-type CardService struct {
-	repo *postgres.CardRepository
+type CardView struct {
+	ID           string `json:"id"`
+	AccountID    string `json:"account_id"`
+	MaskedNumber string `json:"number"`
+	Expiry       string `json:"expiry"`
 }
 
-func NewCardService(repo *postgres.CardRepository) *CardService {
-	return &CardService{repo: repo}
+type CardService struct {
+	repo        *postgres.CardRepository
+	accountRepo *postgres.AccountRepository
+	hmacSecret  string
+}
+
+func NewCardService(repo *postgres.CardRepository, accountRepo *postgres.AccountRepository, hmacSecret string) *CardService {
+	return &CardService{repo: repo, accountRepo: accountRepo, hmacSecret: hmacSecret}
 }
 
 func (s *CardService) IssueCard(ctx context.Context, userID, accountID string) error {
-	// 1. Генерация номера карты по алгоритму Луна (IIN: 400000)
+	if err := s.accountRepo.VerifyOwnership(ctx, accountID, userID); err != nil {
+		return err
+	}
+
 	cardNumber, err := utils.GenerateLuhnNumber("400000")
 	if err != nil {
 		return err
 	}
-	expiration := "12/29" // Срок действия (захардкожено для примера)
-	cvv := "123"          // Имитация генерации CVV
+	expiration := utils.GenerateExpiry(3)
+	cvv, err := utils.GenerateCVV()
+	if err != nil {
+		return err
+	}
 
-	// 2. Хеширование CVV через bcrypt
 	cvvHash, err := utils.HashCVV(cvv)
 	if err != nil {
 		return err
 	}
 
-	// 3. Шифрование номера и срока PGP (для примера имитируем строку-результат шифрования)
-	// В продакшене здесь вызов пакета github.com/ProtonMail/gopenpgp/v2
-	encNumber := "[PGP_ENCRYPTED_DATA:" + cardNumber + "]"
-	encExpiration := "[PGP_ENCRYPTED_DATA:" + expiration + "]"
+	encNumber, err := utils.EncryptPGP(cardNumber)
+	if err != nil {
+		return fmt.Errorf("encrypt card number: %w", err)
+	}
+	encExpiration, err := utils.EncryptPGP(expiration)
+	if err != nil {
+		return fmt.Errorf("encrypt expiry: %w", err)
+	}
 
-	// 4. Расчет HMAC для проверки целостности записи в БД
-	secretKey := "card_integrity_secret"
-	combinedData := cardNumber + expiration + cvv
-	hmacSig := utils.GenerateHMAC(combinedData, secretKey)
+	hmacSig := utils.GenerateHMAC(cardNumber+expiration, s.hmacSecret)
 
-	// Сохранение в БД через репозиторий
-	dbCard := postgres.DBKeyCard{
+	return s.repo.SaveCard(ctx, postgres.DBKeyCard{
 		AccountID:           accountID,
 		UserID:              userID,
 		EncryptedNumber:     encNumber,
 		EncryptedExpiration: encExpiration,
 		CVVHash:             cvvHash,
 		HMACSignature:       hmacSig,
-	}
-
-	return s.repo.SaveCard(ctx, dbCard)
+	})
 }
 
-func (s *CardService) GetCards(ctx context.Context, userID string) ([]postgres.DBKeyCard, error) {
-	// Возвращает список карт (в хендлере их можно расшифровать обратно)
-	return s.repo.GetCardsByUserID(ctx, userID)
+func (s *CardService) GetCards(ctx context.Context, userID string) ([]CardView, error) {
+	cards, err := s.repo.GetCardsByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]CardView, 0, len(cards))
+	for _, c := range cards {
+		view, err := s.decryptCard(c)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, view)
+	}
+	return result, nil
+}
+
+func (s *CardService) PayWithCard(ctx context.Context, userID, cardID string, amount float64) error {
+	if amount <= 0 {
+		return errors.New("amount must be greater than zero")
+	}
+
+	card, err := s.repo.GetCardByID(ctx, cardID)
+	if err != nil {
+		return err
+	}
+	if card.UserID != userID {
+		return postgres.ErrAccessDenied
+	}
+
+	return s.accountRepo.PayFromAccount(ctx, card.AccountID, amount, userID)
+}
+
+func (s *CardService) decryptCard(c postgres.DBKeyCard) (CardView, error) {
+	number, err := utils.DecryptPGP(c.EncryptedNumber)
+	if err != nil {
+		return CardView{}, fmt.Errorf("decrypt number: %w", err)
+	}
+	expiry, err := utils.DecryptPGP(c.EncryptedExpiration)
+	if err != nil {
+		return CardView{}, fmt.Errorf("decrypt expiry: %w", err)
+	}
+
+	if !utils.VerifyHMAC(number+expiry, c.HMACSignature, s.hmacSecret) {
+		return CardView{}, errors.New("card data integrity check failed")
+	}
+
+	return CardView{
+		ID:           c.ID,
+		AccountID:    c.AccountID,
+		MaskedNumber: utils.MaskCardNumber(number),
+		Expiry:       expiry,
+	}, nil
 }

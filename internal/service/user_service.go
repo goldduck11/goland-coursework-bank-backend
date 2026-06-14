@@ -1,8 +1,8 @@
 package service
 
 import (
-	"awesomeProject/internal/model"
-	"awesomeProject/internal/repository"
+	"banking-system/internal/model"
+	"banking-system/internal/repository"
 	"context"
 	"errors"
 
